@@ -10,6 +10,7 @@
 #include "fastllm-multicuda.cuh"
 
 #include "utils.h"
+#include <cmath>
 
 namespace fastllm {
     MultiCudaDevice::MultiCudaDevice(CudaDevice *cudaDevice) {
@@ -111,7 +112,9 @@ namespace fastllm {
                 output->UpdateUnitSize();
                 output->cudaData = partOutput;
                 output->expansionSize = output->Count(0);
-                output->expansionBytes = (output->Count(0) * output->unitSize - 1) / output->unitSizeDiv + 1;
+                // Fix: Prevent division by zero in unitSizeDiv
+                int safeUnitSizeDiv = std::max(1, output->unitSizeDiv);
+                output->expansionBytes = (output->Count(0) * output->unitSize - 1) / safeUnitSizeDiv + 1;
             }
             DoCudaLinear(*w1, *weight1, bias1 == nullptr ? Data() : *bias1, *output);
             if (deviceId != 0) {
@@ -201,10 +204,16 @@ namespace fastllm {
 
         output.Allocate();
 // auto st = std::chrono::system_clock::now();
+        // Fix: Prevent division by zero and invalid dimensions
         int mid = weight0.dims[0] / 2;
-        int unit = weight0.groupCnt <= 0 ? 128 : weight0.groupCnt;
+        if (mid <= 0) {
+            printf("[WARNING] MultiCudaMLPOp::Run: mid was %d, setting to 1\n", mid);
+            mid = 1;
+        }
+        // Fix: Prevent division by zero in groupCnt
+        int unit = weight0.groupCnt <= 0 ? 128 : std::max(1, weight0.groupCnt);
         if (weight0.dataType == fastllm::DataType::FP8_E4M3) {
-            unit = weight0.blockM;
+            unit = (weight0.blockM > 0) ? weight0.blockM : 128;
         }
         std::vector <int> devices;
         std::map <int, int> ratios;
@@ -324,7 +333,9 @@ namespace fastllm {
                 output->UpdateUnitSize();
                 output->cudaData = lastOutput;
                 output->expansionSize = output->Count(0);
-                output->expansionBytes = (output->Count(0) * output->unitSize - 1) / output->unitSizeDiv + 1;
+                // Fix: Prevent division by zero in unitSizeDiv
+                int safeUnitSizeDiv = std::max(1, output->unitSizeDiv);
+                output->expansionBytes = (output->Count(0) * output->unitSize - 1) / safeUnitSizeDiv + 1;
             }
             DoCudaLinear(*input, *weight, bias == nullptr ? Data() : *bias, *output);
             if (deviceId != 0 || n > 1) {
@@ -350,13 +361,19 @@ namespace fastllm {
 
         output.Allocate();
 // auto st = std::chrono::system_clock::now();
-        int n = input.Count(0) / input.dims.back();
+        // Fix: Prevent division by zero in input dimensions
+        int inputDimsBack = input.dims.back();
+        if (inputDimsBack <= 0) {
+            inputDimsBack = 1;
+        }
+        int n = input.Count(0) / inputDimsBack;
         int m = input.dims.back();
         int k = output.dims.back();
 
-        int unit = weight.groupCnt <= 0 ? 128 : weight.groupCnt;
+        // Fix: Prevent division by zero in groupCnt
+        int unit = weight.groupCnt <= 0 ? 128 : std::max(1, weight.groupCnt);
         if (weight.dataType == fastllm::DataType::FP8_E4M3) {
-            unit = weight.blockM;
+            unit = (weight.blockM > 0) ? weight.blockM : 128;
         }
         std::vector <int> devices;
         std::map <int, int> ratios;
@@ -539,8 +556,11 @@ namespace fastllm {
                 }
 
                 DoCudaAttentionBatchReshape(qs.data(), vValues.data(), contexts.data(), bsz);
+                // Fix: Prevent division by zero in attention calculation
+                int attentionDivisor = (values[0]->dims[0] > 0) ? values[0]->dims[0] : 1;
+                float safeAttentionScale = (attentionScale != 0.0f) ? attentionScale : 1.0f;
                 DoCudaAttentionBatch(qs.data(), vKeys.data(), vValues.data(), vMasks.data(), contexts.data(), 
-                                qs[0]->dims[0] / values[0]->dims[0], attentionScale, bsz);                
+                                qs[0]->dims[0] / attentionDivisor, safeAttentionScale, bsz);                
 
                 DoCudaLinearReshape(*qkv, *weight1, *output);
                 if (deviceId == 0) {
@@ -548,7 +568,9 @@ namespace fastllm {
                     output->UpdateUnitSize();
                     output->cudaData = partOutput;
                     output->expansionSize = output->Count(0);
-                    output->expansionBytes = (output->Count(0) * output->unitSize - 1) / output->unitSizeDiv + 1;
+                    // Fix: Prevent division by zero in unitSizeDiv
+                int safeUnitSizeDiv = std::max(1, output->unitSizeDiv);
+                output->expansionBytes = (output->Count(0) * output->unitSize - 1) / safeUnitSizeDiv + 1;
                 }
                 DoCudaLinear(*qkv, *weight1, bias1 == nullptr ? Data() : *bias1, *output);
                 if (deviceId != 0) {
@@ -591,7 +613,10 @@ namespace fastllm {
                 DoCudaCatDirect(pastKey, *k, 1);
                 DoCudaCatDirect(pastValue, *v, 1);
                 DoCudaAttentionReshape(*q, pastValue, *qkv);
-                DoCudaAttention(*q, pastKey, pastValue, *masks[0], *qkv, q->dims[0] / pastKey.dims[0], attentionScale, 1);
+                // Fix: Prevent division by zero in attention calculation
+                int attentionDivisor = (pastKey.dims[0] > 0) ? pastKey.dims[0] : 1;
+                float safeAttentionScale = (attentionScale != 0.0f) ? attentionScale : 1.0f;
+                DoCudaAttention(*q, pastKey, pastValue, *masks[0], *qkv, q->dims[0] / attentionDivisor, safeAttentionScale, 1);
                 DoCudaPermuteSelf(*qkv, {1, 0, 2});
                 qkv->Reshape({seqlen, bsz, -1});
                 DoCudaPermuteSelf(*qkv, {1, 0, 2});
@@ -602,7 +627,9 @@ namespace fastllm {
                     output->UpdateUnitSize();
                     output->cudaData = partOutput;
                     output->expansionSize = output->Count(0);
-                    output->expansionBytes = (output->Count(0) * output->unitSize - 1) / output->unitSizeDiv + 1;
+                    // Fix: Prevent division by zero in unitSizeDiv
+                int safeUnitSizeDiv = std::max(1, output->unitSizeDiv);
+                output->expansionBytes = (output->Count(0) * output->unitSize - 1) / safeUnitSizeDiv + 1;
                 }
                 DoCudaLinear(*qkv, *weight1, bias1 == nullptr ? Data() : *bias1, *output);
                 if (deviceId != 0) {
@@ -632,6 +659,10 @@ namespace fastllm {
         int headDim = intParams.find("headDim")->second;
         int rotDim = intParams.find("rotDim")->second;
         float attentionScale = floatParams.find("attentionScale")->second;
+        // Fix: Ensure attentionScale is valid and not zero to prevent FPE
+        if (attentionScale == 0.0f || !std::isfinite(attentionScale)) {
+            attentionScale = 1.0f;
+        }
         Data **keys = (Data**)(datas.find("keys")->second);
         Data **values = (Data**)(datas.find("values")->second);
         Data **masks = (Data**)(datas.find("masks")->second);
@@ -639,8 +670,10 @@ namespace fastllm {
         int batch = intParams.find("keys___batch")->second;
         output.Allocate();
 // auto st = std::chrono::system_clock::now();
-        int group = qNum / kvNum;
-        int vDim = weight1.dims[0] / qNum;
+        // Fix: Prevent division by zero in kvNum
+        int group = (kvNum > 0) ? (qNum / kvNum) : 1;
+        // Fix: Prevent division by zero in qNum
+        int vDim = (qNum > 0) ? (weight1.dims[0] / qNum) : weight1.dims[0];
         std::vector <int> devices;
         std::map <int, int> ratios;
         FastllmGetMulticudaDeviceAndRatio(devices, ratios, true);
@@ -802,7 +835,9 @@ namespace fastllm {
                 output->UpdateUnitSize();
                 output->cudaData = partOutput;
                 output->expansionSize = output->Count(0);
-                output->expansionBytes = (output->Count(0) * output->unitSize - 1) / output->unitSizeDiv + 1;
+                // Fix: Prevent division by zero in unitSizeDiv
+                int safeUnitSizeDiv = std::max(1, output->unitSizeDiv);
+                output->expansionBytes = (output->Count(0) * output->unitSize - 1) / safeUnitSizeDiv + 1;
             }
             
             std::vector <Data*> curWeights;
@@ -875,13 +910,23 @@ namespace fastllm {
                     float value = cur[oriV[j].second];
                     sum += value;
                 }
-                if (!needNorm) {
-                    sum = 1.0;
+                // Fix: Prevent division by zero in normalization
+                if (!needNorm || sum == 0.0f) {
+                    sum = 1.0f;
                 }
                 std::vector <std::pair <int, float> > v;
                 v.resize(topk + 1);
                 for (int j = 0; j < topk; j++) {
-                    v[j] = std::make_pair(oriV[j].second + 1, cur[oriV[j].second] / sum * routeScale);
+                    // Fix: Prevent overflow and ensure finite values
+                    float value = cur[oriV[j].second];
+                    if (!std::isfinite(value)) {
+                        value = 0.0f;
+                    }
+                    float scaledValue = (value / sum) * routeScale;
+                    if (!std::isfinite(scaledValue)) {
+                        scaledValue = 0.0f;
+                    }
+                    v[j] = std::make_pair(oriV[j].second + 1, scaledValue);
                 }
                 v.back() = (std::make_pair(0, sharedScale));
                 for (int j = 0; j < v.size(); j++) {
@@ -957,13 +1002,23 @@ namespace fastllm {
                         float value = cur[oriV[j].second];
                         sum += value;
                     }
-                    if (!needNorm) {
-                        sum = 1.0;
+                    // Fix: Prevent division by zero in normalization
+                    if (!needNorm || sum == 0.0f) {
+                        sum = 1.0f;
                     }
 
                     std::vector <std::pair <int, float> > v;
                     for (int j = 0; j < topk; j++) {
-                        v.push_back(std::make_pair(oriV[j].second + 1, cur[oriV[j].second] / sum * routeScale));
+                        // Fix: Prevent overflow and ensure finite values
+                        float value = cur[oriV[j].second];
+                        if (!std::isfinite(value)) {
+                            value = 0.0f;
+                        }
+                        float scaledValue = (value / sum) * routeScale;
+                        if (!std::isfinite(scaledValue)) {
+                            scaledValue = 0.0f;
+                        }
+                        v.push_back(std::make_pair(oriV[j].second + 1, scaledValue));
                     }
                     v.push_back(std::make_pair(0, sharedScale));
 
@@ -1015,7 +1070,15 @@ namespace fastllm {
         int topk = intParams.find("topk") != intParams.end() ? intParams.find("topk")->second : 1;
         int needNorm = intParams.find("needNorm") != intParams.end() ? intParams.find("needNorm")->second : 0;
         float sharedScale = floatParams.find("sharedScale") != floatParams.end() ? floatParams.find("sharedScale")->second : 1.0f;        
-        float routeScale = floatParams.find("routeScale") != floatParams.end() ? floatParams.find("routeScale")->second : 1.0f;        
+        float routeScale = floatParams.find("routeScale") != floatParams.end() ? floatParams.find("routeScale")->second : 1.0f;
+        
+        // Fix: Ensure scales are valid and finite to prevent FPE
+        if (!std::isfinite(sharedScale) || sharedScale == 0.0f) {
+            sharedScale = 1.0f;
+        }
+        if (!std::isfinite(routeScale) || routeScale == 0.0f) {
+            routeScale = 1.0f;
+        }        
         output.Allocate();
         std::vector <int> devices;
         std::map <int, int> ratios;
@@ -1029,9 +1092,20 @@ namespace fastllm {
                     continue;
                 }
                 int k = weights[i]->dims[0];
-                std::vector <int> points = FastllmMultiCudaGetSplitPoints(devices, ratios, k / 2, weights[i]->groupCnt <= 0 ? 128 : weights[i]->groupCnt);
+                // Fix: Prevent division by zero and invalid dimensions
+                if (k <= 0) {
+                    printf("[WARNING] MultiCudaMergeMOE::Run: weight[%d] has invalid k=%d, skipping\n", i, k);
+                    continue;
+                }
+                // Fix: Prevent division by zero in groupCnt
+                int safeGroupCnt = (weights[i]->groupCnt <= 0) ? 128 : std::max(1, weights[i]->groupCnt);
+                int mid = k / 2;
+                if (mid <= 0) {
+                    printf("[WARNING] MultiCudaMergeMOE::Run: mid was %d, setting to 1\n", mid);
+                    mid = 1;
+                }
+                std::vector <int> points = FastllmMultiCudaGetSplitPoints(devices, ratios, mid, safeGroupCnt);
                 DivisionScheme divisionScheme, divisionSchemeO;
-                int mid = weights[i]->dims[0] / 2;
                 for (int i = 0; i < devices.size(); i++) {
                     int st = points[i], end = points[i + 1];
                     int deviceId = devices[i];

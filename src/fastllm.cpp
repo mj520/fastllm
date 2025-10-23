@@ -954,6 +954,8 @@ namespace fastllm {
     }
 
     void Data::UpdateUnitSize() {
+        this->unitSize = 1;
+        this->unitSizeDiv = 1;
         if (this->dataType == DataType::FLOAT32) {
             this->unitSize = 4;
             this->unitSizeDiv = 1;
@@ -1013,8 +1015,14 @@ namespace fastllm {
                 tensor->type = (ggml_type)this->ggmlType;
                 const size_t  type_size = ggml_type_size(tensor->type);
                 const int64_t blck_size = ggml_blck_size(tensor->type);
-                tensor->nb[0] = type_size;
-                tensor->nb[1] = tensor->nb[0] * (tensor->ne[0] / blck_size);
+                // Fix FPE: Prevent division by zero
+                if (blck_size == 0) {
+                    tensor->nb[0] = type_size;
+                    tensor->nb[1] = tensor->nb[0];
+                } else {
+                    tensor->nb[0] = type_size;
+                    tensor->nb[1] = tensor->nb[0] * (tensor->ne[0] / blck_size);
+                }
                 for (int j = 2; j < GGML_MAX_DIMS; ++j) {
                     tensor->nb[j] = tensor->nb[j - 1] * tensor->ne[j - 1];
                 }
@@ -1023,9 +1031,11 @@ namespace fastllm {
 
         if (this->expansionDims.size() == 0) {
             this->strides.resize(dims.size(), 1);
-            this->strides.back() = 1;
-            for (int i = this->dims.size() - 2; i >= 0; i--) {
-                this->strides[i] = this->dims[i + 1] * this->strides[i + 1];
+            if (dims.size() > 0) {
+                this->strides.back() = 1;
+                for (int i = this->dims.size() - 2; i >= 0; i--) {
+                    this->strides[i] = this->dims[i + 1] * this->strides[i + 1];
+                }
             }
         }
     }
@@ -1067,12 +1077,16 @@ namespace fastllm {
         if (this->dataType == DataType::DATA_GGUF_FORMAT) {
             return ggml_nbytes((ggml_tensor*)this->ggmlTensor);
         }
-        return (this->strides[0] * this->dims[0] * this->unitSize - 1) / this->unitSizeDiv + 1;
+        // Fix FPE: Prevent division by zero
+        int safeUnitSizeDiv = (this->unitSizeDiv <= 0) ? 1 : this->unitSizeDiv;
+        return (this->strides[0] * this->dims[0] * this->unitSize - 1) / safeUnitSizeDiv + 1;
     }
 
     void Data::MallocSpace(uint64_t size) {
         this->expansionSize = size;
-        this->expansionBytes = (size * this->unitSize - 1) / this->unitSizeDiv + 1;
+        // Fix FPE: Prevent division by zero
+        int safeUnitSizeDiv = (this->unitSizeDiv <= 0) ? 1 : this->unitSizeDiv;
+        this->expansionBytes = (size * this->unitSize - 1) / safeUnitSizeDiv + 1;
         if (this->dataDevice == DataDevice::CPU) {
             this->cpuData = new uint8_t[this->expansionBytes];
             memset(this->cpuData, 0, this->expansionBytes*sizeof(uint8_t));
@@ -3028,6 +3042,12 @@ namespace fastllm {
         for (auto &it : deviceMap) {
             sum += it.second;
         }
+        
+        // Fix: Prevent division by zero in device mapping
+        if (sum <= 0 || total <= 0) {
+            return;
+        }
+        
         std::string curDevice = deviceMap.begin()->first;
         for (auto &it : deviceMap) {
             cur += it.second;

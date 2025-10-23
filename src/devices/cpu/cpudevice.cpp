@@ -6279,8 +6279,17 @@ namespace fastllm {
                 value[i * m + j] = expf(value[i * m + j] - maxValue);
                 sum += value[i * m + j];
             }
-            for (int j = 0; j < m; j++) {
-                value[i * m + j] /= sum;
+            // Fix: Prevent division by zero in softmax
+            if (sum > 0.0f) {
+                for (int j = 0; j < m; j++) {
+                    value[i * m + j] /= sum;
+                }
+            } else {
+                // If sum is zero, set all values to 1/m
+                float uniformValue = 1.0f / m;
+                for (int j = 0; j < m; j++) {
+                    value[i * m + j] = uniformValue;
+                }
             }
         }
     }

@@ -157,6 +157,13 @@ std::vector <int> FastllmMultiCudaGetSplitPoints(std::vector <int> &multiCudaCur
     } else {
         totalRatio = deviceNum;
     }
+    
+    // Fix: Prevent division by zero
+    if (totalRatio <= 0) {
+        printf("[WARNING] FastllmMultiCudaGetSplitPoints: totalRatio was %d, setting to 1\n", totalRatio);
+        totalRatio = 1;
+    }
+    
     std::vector <int> ret;
     int cur = 0;
     for (int i = 0; i < deviceNum; i++) {
@@ -220,6 +227,11 @@ void CopyToMultiDevices(fastllm::Data &data, std::vector <int> devices, bool cop
 
 bool SplitMultiCudaWeight(fastllm::Data &weight, fastllm::Data &bias, 
                     std::vector <int> &multiCudaCurrentDevices, DivisionScheme divisionScheme, int splitAxis) {
+    // Fix FPE: GGUF format should not be split in this way
+    if (weight.dataType == fastllm::DataType::DATA_GGUF_FORMAT) {
+        printf("[WARNING] SplitMultiCudaWeight: Cannot split GGUF format weight, skipping\n");
+        return false;
+    }
     int deviceNum = multiCudaCurrentDevices.size();
     for (int i = 0; i < deviceNum; i++) {
         if (specialDeviceIds.find(multiCudaCurrentDevices[i]) == specialDeviceIds.end()) {
@@ -241,6 +253,13 @@ bool SplitMultiCudaWeight(fastllm::Data &weight, fastllm::Data &bias,
     weight.multiDeviceData = true;
     bias.multiDeviceData = true;
     int k = weight.dims[0], m = weight.dims[1];
+    
+    // Fix: Prevent division by zero in unitSizeDiv
+    if (weight.unitSizeDiv <= 0) {
+        printf("[ERROR] SplitMultiCudaWeight: weight.unitSizeDiv=%d is invalid! Setting to 1\n", weight.unitSizeDiv);
+        weight.unitSizeDiv = 1;
+    }
+    
     cudaError_t state = cudaSuccess;
     float *cudaBiasData = (float*)FastllmCudaMalloc(k * sizeof(float));
     if (bias.dims.size() > 0) {
@@ -337,24 +356,27 @@ bool SplitMultiCudaWeight(fastllm::Data &weight, fastllm::Data &bias,
             auto curDevice = weight.multiDeviceDatas[deviceId];
             curDevice->blockK = weight.blockK;
             curDevice->blockM = weight.blockM;
-            int ks = (curDevice->dims[0] - 1) / curDevice->blockK + 1;
-            int ms = (curDevice->dims[1] - 1) / curDevice->blockM + 1;
+            // Fix: Prevent division by zero in block calculations
+            int blockK = std::max(1, curDevice->blockK);
+            int blockM = std::max(1, curDevice->blockM);
+            int ks = (curDevice->dims[0] - 1) / blockK + 1;
+            int ms = (curDevice->dims[1] - 1) / blockM + 1;
             curDevice->scales.resize(ks * ms);
             if (splitAxis == 0) {
                 int curLen = 0;
                 for (auto &it : div) {
-                    memcpy(curDevice->scales.data() + curLen * ms, weight.scales.data() + it.first / curDevice->blockM * ms, 
-                        (it.second - it.first) / curDevice->blockM * ms * sizeof(float));
-                    curLen += (it.second - it.first) / curDevice->blockM;
+                    memcpy(curDevice->scales.data() + curLen * ms, weight.scales.data() + it.first / blockM * ms, 
+                        (it.second - it.first) / blockM * ms * sizeof(float));
+                    curLen += (it.second - it.first) / blockM;
                 }
             } else {
                 int oriMs = weight.scales.size() / ks;
                 for (int i = 0; i < ks; i++) {
                     int curLen = 0;
                     for (auto &it : div) {
-                        memcpy(curDevice->scales.data() + i * ms, weight.scales.data() + i * oriMs + it.first / curDevice->blockM, 
-                            (it.second - it.first) / curDevice->blockM * sizeof(float));
-                        curLen += (it.second - it.first) / curDevice->blockM;
+                        memcpy(curDevice->scales.data() + i * ms, weight.scales.data() + i * oriMs + it.first / blockM, 
+                            (it.second - it.first) / blockM * sizeof(float));
+                        curLen += (it.second - it.first) / blockM;
                     }   
                 }
             }
@@ -420,7 +442,9 @@ bool SplitMultiCudaWeight(fastllm::Data &weight, fastllm::Data &bias,
                     curDevice->group = weight.group;
                     curDevice->groupCnt = weight.groupCnt;
                     if (weight.dataType == fastllm::DataType::INT4_GROUP) {
-                        int base = div[0].first / weight.groupCnt;
+                        // Fix: Prevent division by zero in groupCnt
+                        int groupCnt = std::max(1, weight.groupCnt);
+                        int base = div[0].first / groupCnt;
                         std::vector <float> scales, mins;
                         for (int i = 0; i < weight.scales.size(); i++) {
                             scales.push_back((i + base < weight.scales.size() ? weight.scales[i + base] : 0.0f));

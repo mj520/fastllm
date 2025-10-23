@@ -1287,8 +1287,11 @@ if (false) {
 
                         if (tensors.size() != 0) {
                             locker.lock();
-                            printf("Loading %d \r", (++cnt) * 100 / (int)tensors.size());
-                            fflush(stdout);
+                            int curProgress = (++cnt) * 100 / (int)tensors.size();
+                            printf("Loading %d \r", curProgress);
+                            if (curProgress % 20 == 0) {  // 仅每20%时fflush
+                                fflush(stdout);
+                            }
                             locker.unlock();
                         }
                     }
@@ -1604,8 +1607,11 @@ if (false) {
                         if (StringEndWith(tensorName, "_scale_inv") ||
                             (isAwqModel && (StringEndWith(tensorName, ".scales") || StringEndWith(tensorName, ".qzeros")))) {
                             locker.lock();
-                            printf("Loading %d \r", (++cnt) * 100 / (int)tensorMap.size());
-                            fflush(stdout);
+                            int curProgress = (++cnt) * 100 / (int)tensorMap.size();
+                            printf("Loading %d \r", curProgress);
+                            if (curProgress % 20 == 0) {  // 仅每20%时fflush
+                                fflush(stdout);
+                            }
                             locker.unlock();
                             continue;
                         }
@@ -1802,6 +1808,7 @@ if (false) {
                                                 break;
                                             }
                                             if (model->weight[input].dataType != model->weight[it.inputs[0]].dataType ||
+                                                model->weight[input].ggmlType != model->weight[it.inputs[0]].ggmlType ||
                                                 model->weight[input].dims[1] != model->weight[it.inputs[0]].dims[1]) {
                                                 canMerge = false;
                                                 break;
@@ -1875,7 +1882,7 @@ if (false) {
                                         try {
                                             std::string s = getenv("FASTLLM_ACTIVATE_NUMA");
                                             if (s != "" && s != "OFF") {
-                                                locker.lock();
+                                            locker.lock();
                                                 if (model->specialWeights.find(mergeName) != model->specialWeights.end()) {
                                                     mergeData.weightSum.resize(1);
                                                     RegisterFastllmData(&mergeData, it.type);       
@@ -1911,8 +1918,9 @@ if (false) {
                         }
 
                         locker.lock();
-                        printf("Loading %d \r", (++cnt) * 100 / (int)tensorMap.size());
-                        fflush(stdout);
+                        int curProgress = (++cnt) * 100 / (int)tensorMap.size();
+                        printf("Loading %d \r", curProgress);
+                        if (curProgress % 20 == 0) { fflush(stdout); }  // 仅每20%时刷新
                         locker.unlock();
                     }
                 }, parts[i].first, parts[i].second)

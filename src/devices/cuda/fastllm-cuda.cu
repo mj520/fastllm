@@ -1017,7 +1017,7 @@ __global__ void AttnBlockUpdate(half *data, int n, int m, float *lastMax, float 
 
     if (tid == 0) {
         float oldSum = lastSum[bid] * exp(lastMax[bid] - curMax[bid]);
-        scale = oldSum / curSum[bid];
+        scale = (curSum[bid] != 0.0f) ? (oldSum / curSum[bid]) : 1.0f;
         lastSum[bid] = curSum[bid];
         lastMax[bid] = curMax[bid];
     }
@@ -1085,7 +1085,7 @@ __device__ void FastllmSoftmaxKernelInner1Func(float *input, float *output, int 
     __syncthreads();
 
     for (int i = tid; i < channels; i += THREAD_PER_BLOCK) {
-        output[i] /= sdata[0];
+        if (sdata[0] != 0.0f) output[i] /= sdata[0]; else output[i] = 0.0f;
     }
 }
 
@@ -1158,7 +1158,7 @@ __device__ void FastllmSoftmaxKernelInner1Func(half *input, half *output, int ch
     }
     __syncthreads();
 
-    float scale = 1.0 / sdata[0];
+    float scale = (sdata[0] != 0.0f) ? (1.0f / sdata[0]) : 0.0f;
     for (int i = tid; i < channels; i += THREAD_PER_BLOCK) {
         output[i] = (half)(exp((float)input[i] - maxV) * scale);
     }
@@ -3888,7 +3888,6 @@ void * FastllmCudaDirectMalloc(size_t size) {
     }
     return ret;
 }
-
 void FastllmCudaDirectFree(void *ret) {
     cudaError_t state = cudaFree(ret);
     //checkCudaErrors("Error: CUDA error when release memory!", state);

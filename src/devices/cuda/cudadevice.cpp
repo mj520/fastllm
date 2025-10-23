@@ -8,6 +8,7 @@
 #include "fastllm-cuda.cuh"
 
 #include "utils.h"
+#include <cmath>
 
 namespace fastllm {
     CudaDevice::CudaDevice() {
@@ -1223,13 +1224,23 @@ namespace fastllm {
                     float value = cur[oriV[j].second];
                     sum += value;
                 }
-                if (!needNorm) {
-                    sum = 1.0;
+                // Fix: Prevent division by zero in normalization
+                if (!needNorm || sum == 0.0f) {
+                    sum = 1.0f;
                 }
                 std::vector <std::pair <int, float> > v;
                 v.resize(topk + 1);
                 for (int j = 0; j < topk; j++) {
-                    v[j] = std::make_pair(oriV[j].second + 1, cur[oriV[j].second] / sum * routeScale);
+                    // Fix: Prevent overflow and ensure finite values
+                    float value = cur[oriV[j].second];
+                    if (!std::isfinite(value)) {
+                        value = 0.0f;
+                    }
+                    float scaledValue = (value / sum) * routeScale;
+                    if (!std::isfinite(scaledValue)) {
+                        scaledValue = 0.0f;
+                    }
+                    v[j] = std::make_pair(oriV[j].second + 1, scaledValue);
                 }
                 v.back() = (std::make_pair(0, sharedScale));
                 for (int j = 0; j < v.size(); j++) {
@@ -1295,13 +1306,23 @@ namespace fastllm {
                         float value = cur[oriV[j].second];
                         sum += value;
                     }
-                    if (!needNorm) {
-                        sum = 1.0;
+                    // Fix: Prevent division by zero in normalization
+                    if (!needNorm || sum == 0.0f) {
+                        sum = 1.0f;
                     }
 
                     std::vector <std::pair <int, float> > v;
                     for (int j = 0; j < topk; j++) {
-                        v.push_back(std::make_pair(oriV[j].second + 1, cur[oriV[j].second] / sum * routeScale));
+                        // Fix: Prevent overflow and ensure finite values
+                        float value = cur[oriV[j].second];
+                        if (!std::isfinite(value)) {
+                            value = 0.0f;
+                        }
+                        float scaledValue = (value / sum) * routeScale;
+                        if (!std::isfinite(scaledValue)) {
+                            scaledValue = 0.0f;
+                        }
+                        v.push_back(std::make_pair(oriV[j].second + 1, scaledValue));
                     }
                     v.push_back(std::make_pair(0, sharedScale));
 

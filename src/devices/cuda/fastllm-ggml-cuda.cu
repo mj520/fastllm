@@ -797,6 +797,13 @@ template <ggml_type type>
 struct ggml_cuda_type_traits;
 
 template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q2_K> {
+    static constexpr int qk = QK_K;
+    static constexpr int qr = QR2_K;
+    static constexpr int qi = QI2_K;
+};
+
+template<>
 struct ggml_cuda_type_traits<GGML_TYPE_Q3_K> {
     static constexpr int qk = QK_K;
     static constexpr int qr = QR3_K;
@@ -1072,6 +1079,9 @@ static void ggml_cuda_op_mul_mat_vec_q_impl(ggml_backend_cuda_context & ctx, ggm
     const int64_t nrows_dst = true ? ne0 : row_diff;
 
     switch (type) {
+        case GGML_TYPE_Q2_K:
+            mul_mat_vec_q_cuda_T<GGML_TYPE_Q2_K, 1, OType>(src0_dd_i, src1_ddq_i, dst_dd_i, ids_data, ne00, row_diff, src1_padded_row_size, src1_ncols, nrows_dst, ne2, nb02, nb12, nb2, ids_nb0, stream);
+            break;
         case GGML_TYPE_Q3_K:
             mul_mat_vec_q_cuda_T<GGML_TYPE_Q3_K, 1, OType>(src0_dd_i, src1_ddq_i, dst_dd_i, ids_data, ne00, row_diff, src1_padded_row_size, src1_ncols, nrows_dst, ne2, nb02, nb12, nb2, ids_nb0, stream);
             break;
@@ -1332,6 +1342,105 @@ void dequantize_row_q6_K_cuda(const block_q6_K* d_x, half* d_y, int64_t k,
     }
 }
 
+// CUDA kernel for dequantizing q2_K blocks
+__global__ void dequantize_q2_K_cuda_simple(const block_q2_K * __restrict__ x, 
+                                            half * __restrict__ y, 
+                                            int64_t k) {
+    const int nb = k / QK_K;
+    
+    // Each block processes one q2_K block
+    const int block_id = blockIdx.x;
+    if (block_id >= nb) return;
+    
+    const block_q2_K * xi = &x[block_id];
+    half * yi = y + block_id * QK_K;
+    
+    // Check for valid half values to prevent floating point exceptions
+    const float d = __half2float(xi->d);
+    const float min = __half2float(xi->dmin);
+    
+    // Check for NaN or infinity values
+    if (!isfinite(d) || !isfinite(min)) {
+        // Set all outputs to zero if we have invalid scale values
+        const int tid = threadIdx.x;
+        const int stride = blockDim.x;
+        for (int idx = tid; idx < QK_K; idx += stride) {
+            yi[idx] = __float2half(0.0f);
+        }
+        return;
+    }
+    
+    // Each thread processes one or more elements
+    const int tid = threadIdx.x;
+    const int stride = blockDim.x;
+    
+    // Process QK_K elements (256 elements)
+    for (int idx = tid; idx < QK_K; idx += stride) {
+        // QK_K is processed in 16 groups of 16 elements
+        // Each group has its own scale and min value
+        
+        // Determine which group this element belongs to (0-15)
+        const int group = idx / 16;
+        
+        // Extract scale and min for this group
+        // Scales and mins are packed in 4 bits each in the scales array
+        uint8_t sc, m;
+        if (group < 8) {
+            sc = (xi->scales[group] & 0xF);
+            m = (xi->scales[group + 8] & 0xF);
+        } else {
+            sc = (xi->scales[group - 8] >> 4);
+            m = (xi->scales[group] >> 4);
+        }
+        
+        // Prevent potential floating point exceptions with scale values
+        if (sc == 0 && m == 0) {
+            yi[idx] = __float2half(0.0f);
+            continue;
+        }
+        
+        const float d_scaled = d * sc;
+        const float min_scaled = min * m;
+        
+        // Check for NaN or infinity values after scaling
+        if (!isfinite(d_scaled) || !isfinite(min_scaled)) {
+            yi[idx] = __float2half(0.0f);
+            continue;
+        }
+        
+        // Extract the quantized value (2 bits per element)
+        const int qs_idx = idx / 4;  // Which byte in qs array
+        const int shift = 2 * (idx % 4);  // Which 2 bits in the byte (0, 2, 4, or 6)
+        const uint8_t q_val = (xi->qs[qs_idx] >> shift) & 0x3;
+        
+        // Dequantize: y = d * q - min
+        const float result = d_scaled * q_val - min_scaled;
+        
+        // Final check for valid result
+        yi[idx] = __float2half(isfinite(result) ? result : 0.0f);
+    }
+}
+
+// Wrapper function for q2_K dequantization
+void dequantize_row_q2_K_cuda(const block_q2_K* d_x, half* d_y, int64_t k, 
+                              cudaStream_t stream = 0) {
+    assert(k % QK_K == 0);
+    const int nb = k / QK_K;
+    
+    // Use 128 threads per block for good occupancy
+    const int threads_per_block = 128;
+    const int blocks = nb;  // Each block processes one q2_K block
+    
+    // Launch the kernel
+    dequantize_q2_K_cuda_simple<<<blocks, threads_per_block, 0, stream>>>(d_x, d_y, k);
+    
+    // Check for errors
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("Kernel launch error: %s\n", cudaGetErrorString(err));
+    }
+}
+
 // 简单版本的kernel - 直接处理float数组
 __global__ void dequantize_q8_0_cuda_simple(const block_q8_0 * __restrict__ x, 
                                             half * __restrict__ y, 
@@ -1380,7 +1489,9 @@ void dequantize_row_q8_0_cuda(const block_q8_0* d_x, half* d_y, int64_t k,
 using ggml_cuda_dequant_func = void (*) (const char *d_x, half *d_y, int64_t k, cudaStream_t stream);
 
 ggml_cuda_dequant_func GetGGMLDequantFunc(ggml_type type) {
-    if (type == GGML_TYPE_Q4_K) {
+    if (type == GGML_TYPE_Q2_K) {
+        return (ggml_cuda_dequant_func)dequantize_row_q2_K_cuda;
+    } else if (type == GGML_TYPE_Q4_K) {
         return (ggml_cuda_dequant_func)dequantize_row_q4_K_cuda;
     } else if (type == GGML_TYPE_Q6_K) {
         return (ggml_cuda_dequant_func)dequantize_row_q6_K_cuda;
